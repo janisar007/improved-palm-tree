@@ -31,7 +31,7 @@ jobs:
         git push origin HEAD
         gh pr create --title "Docker test PR" --body "Automated Docker test PR" --head $(git branch --show-current)
       env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GITHUB_TOKEN: ${{ secrets.PAT }}
 
   build:
     needs: setup-and-pr
