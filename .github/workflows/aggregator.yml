@@ -2,7 +2,7 @@ name: Repository Status Aggregator
 
 on:
   schedule:
-    - cron: '*/5 * * * *'  # Runs every 15 minutes
+    - cron: '*/15 * * * *'  # Runs every 15 minutes
   workflow_dispatch:  # Allows manual triggering
 
 jobs:
@@ -16,19 +16,23 @@ jobs:
     - name: Get all workflow files
       id: get-workflows
       run: |
-        # Exclude this aggregator workflow and any non-workflow files
-        WORKFLOWS=$(find .github/workflows -name "*.yml" -not -name "aggregator.yml" | sed 's/^\.\///')
-        echo "workflows=${WORKFLOWS}" >> $GITHUB_OUTPUT
-      shell: bash
+        WORKFLOWS=$(find .github/workflows -name "*.yml" -not -name "aggregator.yml" -exec basename {} \;)
+        echo "WORKFLOWS<<EOF" >> $GITHUB_OUTPUT
+        echo "$WORKFLOWS" >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
 
-    - name: Trigger all workflows
-      uses: convictional/trigger-workflow-and-wait@v1.7.0
-      with:
-        owner: ${{ github.repository_owner }}
-        repo: ${{ github.event.repository.name }}
-        github_token: ${{ secrets.PAT }}
-        workflow_file_name: ${{ steps.get-workflows.outputs.workflows }}
-        wait_workflows: true
+    - name: Trigger workflows one-by-one
+      env:
+        GH_TOKEN: ${{ secrets.PAT }}
+      run: |
+        while read -r file; do
+          echo "Triggering workflow: $file"
+          gh workflow run "$file" -R "${{ github.repository }}"
+          sleep 5  # slight delay to avoid API throttling
+        done <<< "${{ steps.get-workflows.outputs.WORKFLOWS }}"
+
+    - name: Wait for workflows to finish
+      run: sleep 180  # Adjust based on average workflow runtime
 
     - name: Get workflow run statuses
       id: workflow-status
@@ -40,11 +44,10 @@ jobs:
             repo: context.repo.repo,
             per_page: 100
           });
-          
+
           const workflowStatus = {};
           const workflowNames = [];
-          
-          // Get the most recent run for each workflow
+
           runs.workflow_runs.forEach(run => {
             if (!workflowStatus[run.name] && run.name !== 'Repository Status Aggregator') {
               workflowStatus[run.name] = {
@@ -55,38 +58,35 @@ jobs:
               workflowNames.push(run.name);
             }
           });
-          
-          return { status: workflowStatus, names: workflowNames.join(',') };
+
+          core.setOutput('status', JSON.stringify(workflowStatus));
+          core.setOutput('names', workflowNames.join(','));
 
     - name: Create status report
       run: |
-        # Create markdown report
         echo "# Workflow Status Report" > report.md
         echo "Generated at $(date)" >> report.md
         echo "" >> report.md
-        
-        # Parse the workflow status from previous step
-        echo '${{ toJSON(steps.workflow-status.outputs) }}' > status.json
-        STATUS=$(jq -r '.status' status.json | jq -r 'to_entries[] | "\(.key): \(.value.conclusion)"')
-        
+
+        echo '${{ steps.workflow-status.outputs.status }}' > status.json
+        STATUS=$(jq -r 'to_entries[] | "\(.key): \(.value.conclusion)"' status.json)
+
         echo "## Workflow Results" >> report.md
         echo "" >> report.md
         echo "| Workflow Name | Status | Details |" >> report.md
-        echo "|--------------|--------|---------|" >> report.md
-        
-        # Add each workflow status to the table
+        echo "|---------------|--------|---------|" >> report.md
+
         while read -r line; do
           name=$(echo "$line" | cut -d':' -f1)
           status=$(echo "$line" | cut -d':' -f2 | xargs)
-          url=$(jq -r ".status.\"$name\".html_url" status.json)
+          url=$(jq -r ".\"$name\".html_url" status.json)
           echo "| $name | $status | [View Run]($url) |" >> report.md
         done <<< "$STATUS"
-        
-        # Count successes and failures
+
         TOTAL=$(echo "$STATUS" | wc -l)
         SUCCESS=$(echo "$STATUS" | grep -i "success" | wc -l)
         FAILED=$(echo "$STATUS" | grep -iv "success" | wc -l)
-        
+
         echo "" >> report.md
         echo "## Summary" >> report.md
         echo "- ✅ $SUCCESS workflows passed" >> report.md
