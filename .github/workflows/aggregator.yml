@@ -1,0 +1,105 @@
+name: Repository Status Aggregator
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'  # Runs every 15 minutes
+  workflow_dispatch:  # Allows manual triggering
+
+jobs:
+  trigger-workflows:
+    runs-on: ubuntu-latest
+    name: Trigger and monitor all workflows
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Get all workflow files
+      id: get-workflows
+      run: |
+        # Exclude this aggregator workflow and any non-workflow files
+        WORKFLOWS=$(find .github/workflows -name "*.yml" -not -name "aggregator.yml" | sed 's/^\.\///')
+        echo "workflows=${WORKFLOWS}" >> $GITHUB_OUTPUT
+      shell: bash
+
+    - name: Trigger all workflows
+      uses: convictional/trigger-workflow-and-wait@v1.7.0
+      with:
+        owner: ${{ github.repository_owner }}
+        repo: ${{ github.event.repository.name }}
+        github_token: ${{ secrets.PAT }}
+        workflow_file_name: ${{ steps.get-workflows.outputs.workflows }}
+        wait_workflows: true
+
+    - name: Get workflow run statuses
+      id: workflow-status
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const { data: runs } = await github.rest.actions.listWorkflowRunsForRepo({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            per_page: 100
+          });
+          
+          const workflowStatus = {};
+          const workflowNames = [];
+          
+          // Get the most recent run for each workflow
+          runs.workflow_runs.forEach(run => {
+            if (!workflowStatus[run.name] && run.name !== 'Repository Status Aggregator') {
+              workflowStatus[run.name] = {
+                conclusion: run.conclusion,
+                html_url: run.html_url,
+                created_at: run.created_at
+              };
+              workflowNames.push(run.name);
+            }
+          });
+          
+          return { status: workflowStatus, names: workflowNames.join(',') };
+
+    - name: Create status report
+      run: |
+        # Create markdown report
+        echo "# Workflow Status Report" > report.md
+        echo "Generated at $(date)" >> report.md
+        echo "" >> report.md
+        
+        # Parse the workflow status from previous step
+        echo '${{ toJSON(steps.workflow-status.outputs) }}' > status.json
+        STATUS=$(jq -r '.status' status.json | jq -r 'to_entries[] | "\(.key): \(.value.conclusion)"')
+        
+        echo "## Workflow Results" >> report.md
+        echo "" >> report.md
+        echo "| Workflow Name | Status | Details |" >> report.md
+        echo "|--------------|--------|---------|" >> report.md
+        
+        # Add each workflow status to the table
+        while read -r line; do
+          name=$(echo "$line" | cut -d':' -f1)
+          status=$(echo "$line" | cut -d':' -f2 | xargs)
+          url=$(jq -r ".status.\"$name\".html_url" status.json)
+          echo "| $name | $status | [View Run]($url) |" >> report.md
+        done <<< "$STATUS"
+        
+        # Count successes and failures
+        TOTAL=$(echo "$STATUS" | wc -l)
+        SUCCESS=$(echo "$STATUS" | grep -i "success" | wc -l)
+        FAILED=$(echo "$STATUS" | grep -iv "success" | wc -l)
+        
+        echo "" >> report.md
+        echo "## Summary" >> report.md
+        echo "- ✅ $SUCCESS workflows passed" >> report.md
+        echo "- ❌ $FAILED workflows failed" >> report.md
+        echo "- 🔄 $TOTAL workflows total" >> report.md
+
+    - name: Create PR with status report
+      uses: peter-evans/create-pull-request@v5
+      with:
+        token: ${{ secrets.PAT }}
+        commit-message: "Update workflow status report"
+        title: "Workflow Status Report - $(date +'%Y-%m-%d %H:%M')"
+        body-file: report.md
+        branch: "workflow-status-report"
+        delete-branch: true
+        labels: "automated,status-report"
