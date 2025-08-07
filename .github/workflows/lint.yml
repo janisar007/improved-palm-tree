@@ -1,0 +1,46 @@
+name: Linting with Random Errors
+
+on:
+  schedule:
+    - cron: '*/18 * * * *'
+  workflow_dispatch:
+
+jobs:
+  setup-and-pr:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Create JS file with lint issues
+      run: |
+        echo "Creating JS file with potential lint issues..."
+        echo "function test() {" > test.js
+        if [ $((RANDOM % 2)) -eq 0 ]; then
+          echo "  console.log('Hello world') // Missing semicolon" >> test.js
+        else
+          echo "  var unusedVar = 123;" >> test.js
+        fi
+        echo "}" >> test.js
+        
+    - name: Create PR
+      run: |
+        git checkout -b lint-test-$(date +%s)
+        git add .
+        git config --global user.name "GitHub Actions"
+        git config --global user.email "actions@github.com"
+        git commit -m "Add JS test file"
+        git push origin HEAD
+        gh pr create --title "Lint test PR" --body "Automated lint test PR" --head $(git branch --show-current)
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  lint:
+    needs: setup-and-pr
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-node@v3
+      with:
+        node-version: 18.x
+    - run: npm install eslint --save-dev
+    - run: npx eslint test.js
